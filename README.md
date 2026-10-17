@@ -109,3 +109,7 @@ await eclassExporter.run([138507], { mode: 'zip', maxMB: 200 });
 eclassExporter.current?.stats;
 eclassExporter.current?.cancel();
 ```
+
+## 许可证
+
+[MIT](LICENSE)
