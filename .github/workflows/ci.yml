@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Syntax check
+        run: node --check src/exporter.js
+      - name: Build
+        run: node build.mjs
+      - name: Committed builds are up to date
+        run: |
+          git diff --exit-code -- extension dist/eclass-exporter.user.js || {
+            echo "::error::extension/ or dist/eclass-exporter.user.js is out of date. Run 'node build.mjs' and commit."
+            exit 1
+          }
+      - name: Lint Firefox extension
+        run: npx --yes web-ext@8 lint --source-dir dist/firefox --no-config-discovery

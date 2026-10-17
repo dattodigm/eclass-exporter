@@ -3,6 +3,7 @@
   "name": "eClass Exporter (YorkU)",
   "version": "1.0.0",
   "description": "Back up eClass courses (content, files, assignments, forums, wikis, quizzes, grades) for offline use.",
+  "homepage_url": "https://github.com/dattodigm/eclass-exporter",
   "content_scripts": [
     {
       "matches": [

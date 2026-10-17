@@ -3,6 +3,10 @@
 // @namespace    https://eclass.yorku.ca/
 // @version      1.0.0
 // @description  Back up eClass courses (content, files, assignments, forums, wikis, quizzes, grades) for offline use.
+// @homepageURL  https://github.com/dattodigm/eclass-exporter
+// @supportURL   https://github.com/dattodigm/eclass-exporter/issues
+// @downloadURL  https://github.com/dattodigm/eclass-exporter/releases/latest/download/eclass-exporter.user.js
+// @updateURL    https://github.com/dattodigm/eclass-exporter/releases/latest/download/eclass-exporter.user.js
 // @match        https://eclass.yorku.ca/*
 // @run-at       document-idle
 // @grant        none

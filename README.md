@@ -1,115 +1,148 @@
-# eClass Exporter（YorkU eClass 课程备份工具）
+**English** | [简体中文](README.zh-CN.md)
 
-把 [eclass.yorku.ca](https://eclass.yorku.ca) 上的课程完整导出到本地，离线也能浏览：
-课程信息、各 section 内容、标签、文件、作业（含自己的提交和老师批注）、讨论区、Wiki、
-Quiz 回顾、Lesson、Book、Glossary、数据库、H5P、链接，以及“我的成绩”。
+# eClass Exporter (YorkU)
 
-- **一键备份全部课程**：在任意 eClass 页面点右下角 **⬇ Export eClass** → *Choose courses…* → *Export selected*
-- **单独导出某门课**：进入课程（或课程里任意活动页）→ **⬇ Export eClass** → *Export this course*
+Back up your courses from [eclass.yorku.ca](https://eclass.yorku.ca) to your own computer and browse them offline:
+course info, section content and labels, files, assignments (including your own submissions and annotated
+feedback), forums, wikis, quiz reviews, lessons, books, glossaries, databases, H5P, links, and your grades.
 
-它运行在你已登录的浏览器标签页里，所以能看到的内容和你在 eClass 上能看到的一样，不需要密码或 token。
+- **Back up every course:** on any eClass page click **⬇ Export eClass** (bottom right) → *Choose courses…* → *Export selected*
+- **Back up one course:** open the course (or any activity in it) → **⬇ Export eClass** → *Export this course*
 
-## 安装（三选一）
+It runs inside the browser tab where you are already signed in, so it saves exactly what you can see on eClass.
+No password or token is needed, and nothing is sent anywhere except to eClass itself.
 
-### A. Chrome / Edge 扩展（推荐）
+## Install
 
-1. 打开 `chrome://extensions`（Edge 用 `edge://extensions`），打开右上角 **开发者模式**。
-2. 点 **加载已解压的扩展程序**，选择本仓库的 `extension/` 文件夹。
-3. 刷新任意 eClass 页面，右下角出现红色 **⬇ Export eClass** 按钮。
+Download from the [latest release](https://github.com/dattodigm/eclass-exporter/releases/latest).
 
-### B. Tampermonkey / Violentmonkey 用户脚本
+### Chrome / Edge (recommended)
 
-安装 Tampermonkey 后新建脚本，把 `dist/eclass-exporter.user.js` 的全部内容粘进去保存。
+1. Download `eclass-exporter-chrome-<version>.zip` and unzip it.
+2. Open `chrome://extensions` (Edge: `edge://extensions`) and turn on **Developer mode**.
+3. Click **Load unpacked** and select the unzipped folder.
+4. Reload any eClass page; a red **⬇ Export eClass** button appears in the bottom-right corner.
 
-### C. 临时使用：粘贴到控制台
+### Firefox
 
-在 eClass 页面按 `F12` → Console，粘贴 `dist/eclass-exporter.user.js` 的全部内容回车，按钮就会出现（刷新页面后消失）。
+- **Userscript (recommended on Firefox):** install [Tampermonkey](https://www.tampermonkey.net/) or
+  [Violentmonkey](https://violentmonkey.github.io/), then open
+  [`eclass-exporter.user.js`](https://github.com/dattodigm/eclass-exporter/releases/latest/download/eclass-exporter.user.js)
+  and confirm the install. It updates itself from new releases.
+- **Extension (experimental):** download `eclass-exporter-firefox-<version>.zip`, open `about:debugging#/runtime/this-firefox`,
+  click **Load Temporary Add-on…** and pick the zip. Temporary add-ons are removed when Firefox restarts,
+  because the extension is not signed by Mozilla.
 
-## 使用
+Firefox cannot write into a folder directly, so it always uses **ZIP** mode.
 
-| 选项 | 说明 |
+### Any browser, one-off
+
+Press `F12` on an eClass page, open **Console**, paste the whole content of `eclass-exporter.user.js` and press Enter.
+The button appears until you reload the page.
+
+## Use
+
+| Option | What it does |
 | --- | --- |
-| Save to a folder | **推荐**（Chrome/Edge）。选一个空文件夹，例如 `文档\eClass-Backup`，文件直接写进去。可断点续传：再次导出到同一文件夹时，已下载的文件会跳过。不要直接选“文档”“桌面”这类系统文件夹，浏览器会拒绝，在里面新建一个子文件夹即可。 |
-| Download a ZIP per course | 每门课下载一个 ZIP（另有一个 `eClass-index.zip` 放总目录）。全部解压到同一个文件夹即可互相链接。适合 Firefox；单门课超过 3.5 GB 会自动分卷。 |
-| Download files and attachments | 关闭后只保存页面，文件链接指向 eClass。 |
-| Forums and discussions | 是否导出讨论区。 |
-| My grades | 保存成绩报告页。 |
-| Skip files larger than N MB | 跳过大文件（如课程录像）；跳过的文件在页面里会用黄色虚线框标出并链接回 eClass。 |
+| Save to a folder | **Recommended** (Chrome/Edge). Pick an empty folder such as `Documents\eClass-Backup`; files are written straight into it. Exporting into the same folder again resumes and skips files that are already there. Browsers refuse system folders like *Documents* or *Desktop* themselves; create a subfolder and pick that. |
+| Download a ZIP per course | One ZIP per course plus `eClass-index.zip` for the overview page. Unzip them all into one folder and the links work across courses. Courses over 3.5 GB are split into parts. |
+| Download files and attachments | Turn off to save pages only; file links then point to eClass. |
+| Forums and discussions | Include forums. |
+| My grades | Save your grade report. |
+| Skip files larger than N MB | Skip big files such as lecture recordings. Skipped files are outlined in yellow on the saved page and link back to eClass. |
 
-导出过程中可以切到别的标签页，但 **不要关闭或刷新这个 eClass 标签页**。
-会话过期（8 小时）时导出会停止并提示，重新登录后再导出到同一文件夹即可继续。
+You can switch to other tabs while it runs, but **do not close or reload the eClass tab**.
+If your eClass session expires (after 8 hours), the export stops with a message; sign in again and export into the same folder to continue.
 
-**速度与限流**：eClass 前面的 AWS 负载均衡器会封禁请求过快的客户端（实测约 9 次/秒持续几分钟后，
-整个 eClass 对该浏览器返回 `403 Forbidden`，约 2 分钟后自动解除）。所以工具把对 eClass 的请求限制在
-约 3 次/秒；文件本体从 CDN 下载，不受此限制。万一仍被限流，工具会自动暂停 1→2→4… 分钟并降速重试。
-实测参考：一门普通课程 1–3 分钟，大型课程（200 个活动、1000+ 文件）约 10 分钟，全部课程预计 30–60 分钟。
+**Speed and rate limits.** eClass sits behind a load balancer that blocks clients sending requests too quickly:
+at roughly 9 requests per second for a few minutes, every eClass page returned `403 Forbidden` for about 2 minutes.
+The exporter therefore keeps eClass requests to about 3 per second. File downloads come from a CDN and are not limited.
+If eClass still pushes back, the exporter pauses (1, 2, 4… minutes), slows down and carries on.
+For reference: a typical course takes 1–3 minutes, a large one (200 activities, 1000+ files) about 10 minutes,
+and all courses together roughly 30–60 minutes.
 
-**断点续传 / 增量更新**：再次导出到同一文件夹时，已存在的文件不会重新请求，页面会重新生成。
-如果老师替换了同名活动里的文件，想拿到新版本，取消勾选 *Skip files already in the folder* 再导出一次。
+**Resuming and updating.** Exporting into the same folder again re-saves the pages but does not re-download files that already exist.
+If an instructor replaced a file and you want the new version, untick *Skip files already in the folder* and export again.
 
-## 导出结果
+## What you get
 
 ```
 eClass-Backup/
-├─ index.html                     ← 所有课程总目录（按学期排序）
+├─ index.html                     ← overview of all courses, newest term first
 ├─ courses.json
-└─ AP-CMDS 4275 M - Power, Resistance and New Media (Winter 2025-2026)/
-   ├─ index.html                  ← 课程主页：信息、讲师、各 section、标签内容、活动链接
-   ├─ course-info.html            ← 课程信息（讲师）
-   ├─ grades.html                 ← 我的成绩
-   ├─ course.json                 ← 完整结构数据（含 eClass 原始 state）
-   ├─ _files/                     ← 摘要/标签里的图片、附件
+└─ AP-CMDS 4275 M - Power, Resistance and New Me (Winter 2025-2026)/
+   ├─ index.html                  ← course home: info, instructors, sections, labels, links to every activity
+   ├─ course-info.html            ← course information (instructors)
+   ├─ grades.html                 ← your grade report
+   ├─ course.json                 ← full structure, including eClass's raw course state
+   ├─ _files/                     ← images and attachments used in summaries and labels
    ├─ 00 - General/
-   │  ├─ 01 - Announcements/      ← 论坛：index.html + discussions/*.html + files/
-   │  ├─ 02 - Social Justice Tech Audit/   ← 作业：说明、截止日期、我的提交、评分、批注 PDF
-   │  ├─ 06 - Syllabus.pdf        ← 文件资源直接保存
+   │  ├─ 01 - Announcements/      ← forum: index.html + discussions/*.html + files/
+   │  ├─ 02 - Social Justice Tech Audit/   ← assignment: instructions, due dates, your submission, grade, annotated PDF
+   │  ├─ 06 - Syllabus.pdf        ← files are saved as-is
    │  └─ 07 - News Finder Sign Ups (link).html
-   └─ 01 - Week 1- Introduction- Why Resist/
-      └─ ...
+   ├─ 01 - Week 1- Introduction- Why Resist/
+   │  └─ ...
+   └─ _Unlisted activities/       ← activities you can open that no visible section lists
 ```
 
-用浏览器打开 `index.html` 就能离线浏览。所有页面顶部有面包屑导航和 “Open on eClass ↗” 原始链接。
+Open `index.html` in a browser to browse offline. Every page has breadcrumbs and an "Open on eClass ↗" link to the original.
 
-## 会导出什么 / 不会导出什么
+## What is and isn't saved
 
-**会**：所有你能访问的活动；受限或隐藏的活动会在课程主页标注 *restricted* 和限制条件。
-无法访问的课程（例如未开放给学生的 Lab/Tutorial 子课程）会在总目录里注明原因。
+**Saved:** every activity you can open. Restricted or hidden activities are listed on the course page as *restricted*,
+together with the restriction. Courses that are closed to students (often lab or tutorial sections) are listed in the overview with the reason.
 
-**不会 / 有限**：
+**Not saved, or only partly:**
 
-- LTI 外部工具、Turnitin、YuJa/YouTube 等嵌入视频：只保存页面和链接，不下载外部平台内容。
-- Lesson：只沿着 Lesson 的左侧菜单抓取页面，不会替你答题，所以菜单里没有的页面不会出现。
-- Quiz：只保存允许回顾的已完成尝试，不会开始新的尝试。
-- 小组 Wiki：保存你所在小组的版本。
-- 其他同学的个人信息：只保存在你能看到的讨论帖里出现的部分。
+- LTI tools, Turnitin and embedded YuJa/YouTube videos: the page and the link are saved, not the content on the external platform.
+- Lessons: pages are followed through the lesson's own menu; the exporter never answers questions for you, so pages the menu doesn't list are missing.
+- Quizzes: only finished attempts whose review is allowed; it never starts a new attempt.
+- Group wikis: your own group's version.
+- Other students' details: only what appears in forum posts you can read.
 
-**只读**：工具只发 GET 请求和三个只读 AJAX 接口，不会提交作业、答题或修改任何设置。
-打开活动页会像你手动点开一样留下“已查看”记录。
+**Read-only.** The exporter only sends GET requests plus three read-only AJAX calls. It never submits assignments, answers questions or changes settings.
+Opening an activity is recorded as a view, the same as clicking on it yourself.
 
-## 开发
+## Development
 
 ```
-src/exporter.js      唯一的源码（扩展、用户脚本、控制台三种形态共用）
-build.mjs            生成 extension/ 与 dist/
-docs/eclass-structure.md   eClass 结构探索笔记（接口、选择器、各模块抓取方式）
+src/exporter.js            the only source file (shared by the extension, the userscript and the console version)
+build.mjs                  generates extension/ (Chrome), dist/firefox/ and dist/eclass-exporter.user.js
+docs/eclass-structure.md   notes on how eClass is built (APIs, selectors, rate limits, how each activity is saved) — in Chinese
+.github/workflows/         CI build check and automatic releases
 ```
 
-修改 `src/exporter.js` 后运行：
+After editing `src/exporter.js`:
 
 ```bash
 node build.mjs
 ```
 
-脚本化调用（控制台）：
+Scripted use from the console:
 
 ```js
-// 导出指定课程 id，ZIP 模式
+// Export specific course ids as ZIP files
 await eclassExporter.run([138507], { mode: 'zip', maxMB: 200 });
-// 当前进度 / 取消
+// Progress / cancel the running export
 eclassExporter.current?.stats;
 eclassExporter.current?.cancel();
 ```
 
-## 许可证
+Firefox's linter (`web-ext lint`) reports warnings about `innerHTML`. Those writes only go into documents created with
+`DOMParser`, which never run scripts or load resources, before being saved to disk.
+
+### Releasing
+
+Bump `VERSION` in `src/exporter.js`, run `node build.mjs`, commit, then tag and push:
+
+```bash
+git tag v1.0.1 && git push origin v1.0.1
+```
+
+The *Release* workflow checks that the tag matches `VERSION`, builds the Chrome and Firefox zips and the userscript,
+and publishes them as a GitHub release.
+
+## License
 
 [MIT](LICENSE)
