@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "eClass Exporter (YorkU)",
+  "version": "1.0.0",
+  "description": "Back up eClass courses (content, files, assignments, forums, wikis, quizzes, grades) for offline use.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://eclass.yorku.ca/*"
+      ],
+      "js": [
+        "exporter.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}
