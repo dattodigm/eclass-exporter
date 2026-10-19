@@ -6,8 +6,13 @@ Back up your courses from [eclass.yorku.ca](https://eclass.yorku.ca) to your own
 course info, section content and labels, files, assignments (including your own submissions and annotated
 feedback), forums, wikis, quiz reviews, lessons, books, glossaries, databases, H5P, links, and your grades.
 
+It also backs up your [Echo360](https://echo360.ca) lecture recordings' material: transcripts, slide decks,
+Q&A discussions and your notes, plus the recordings themselves where the instructor allows downloads
+(see [Echo360](#echo360)).
+
 - **Back up every course:** on any eClass page click **⬇ Export eClass** (bottom right) → *Choose courses…* → *Export selected*
 - **Back up one course:** open the course (or any activity in it) → **⬇ Export eClass** → *Export this course*
+- **Echo360:** open Echo360 (usually from the Echo360 link in an eClass course) and use the **⬇ Export Echo360** button the same way
 
 It runs inside the browser tab where you are already signed in, so it saves exactly what you can see on eClass.
 No password or token is needed, and nothing is sent anywhere except to eClass itself.
@@ -88,6 +93,45 @@ eClass-Backup/
 
 Open `index.html` in a browser to browse offline. Every page has breadcrumbs and an "Open on eClass ↗" link to the original.
 
+## Echo360
+
+The same extension/userscript adds an **⬇ Export Echo360** button on [echo360.ca](https://echo360.ca).
+*Choose courses…* lists your Echo360 courses (the ones with recordings are pre-selected); on a course page,
+*Export this course* saves just that one. Pick the same folder as your eClass backup if you like: Echo360 goes into an
+`Echo360/` subfolder, and the two overview pages link to each other.
+
+For every lesson it saves:
+
+| | |
+| --- | --- |
+| Transcript | `transcript.vtt` (timed captions, plays alongside a video) and `transcript.txt`; the text is also shown on the lesson page so it can be searched |
+| Slides | the instructor's original file (usually a PDF) and `slides.html` with the text of every slide |
+| Q&A | `discussions.html`: questions with their position in the recording, and all replies |
+| Details | date, length, group/week, poster image, `lesson.json` |
+| Recording | **only when the instructor allows downloads.** Otherwise the lesson is marked 🔒 *online only* and links to the Echo360 player |
+
+Plus `my-notes.txt` (your Echo360 notes, when you have any) and an `index.html` per course listing every lesson.
+
+```
+eClass-Backup/
+└─ Echo360/
+   ├─ index.html
+   └─ LE-EECS 2101 A - Fundamentals of Data Structure (Fall 2023-2024)/
+      ├─ index.html
+      └─ 02 - LIVE LECTURE SESSION RECORDINGS/
+         └─ 22 - Week 1 - Session 1/
+            ├─ index.html
+            ├─ transcript.vtt
+            ├─ transcript.txt
+            ├─ Week 1.pdf
+            └─ slides.html
+```
+
+**About recordings.** Instructors decide per course whether students may download recordings, and Echo360 only offers
+the download when they do. The exporter uses that same official download and never saves the streaming copy, because that
+would bypass the instructor's choice. In our testing none of the courses allowed downloads, so the video download path has
+not been exercised yet. If you need a recording, ask the instructor to enable downloads; the next export will pick it up.
+
 ## What is and isn't saved
 
 **Saved:** every activity you can open. Restricted or hidden activities are listed on the course page as *restricted*,
@@ -107,13 +151,17 @@ Opening an activity is recorded as a view, the same as clicking on it yourself.
 ## Development
 
 ```
-src/exporter.js            the only source file (shared by the extension, the userscript and the console version)
-build.mjs                  generates extension/ (Chrome), dist/firefox/ and dist/eclass-exporter.user.js
+src/core.js                shared helpers: file naming, folder/ZIP writers, HTML template, panel CSS
+src/eclass.js              eClass exporter (runs on eclass.yorku.ca)
+src/echo360.js             Echo360 exporter (runs on echo360.ca)
+build.mjs                  bundles core + site into extension/ (Chrome), dist/firefox/ and dist/eclass-exporter.user.js
 docs/eclass-structure.md   notes on how eClass is built (APIs, selectors, rate limits, how each activity is saved) — in Chinese
+docs/echo360-structure.md  the same for Echo360 — in Chinese
 .github/workflows/         CI build check and automatic releases
 ```
 
-After editing `src/exporter.js`:
+The files in `src/` are not standalone scripts: `build.mjs` puts `core.js` and each site file into one function scope.
+After editing anything in `src/`:
 
 ```bash
 node build.mjs
@@ -124,6 +172,8 @@ Scripted use from the console:
 ```js
 // Export specific course ids as ZIP files
 await eclassExporter.run([138507], { mode: 'zip', maxMB: 200 });
+// On echo360.ca: export Echo360 sections by id
+await echo360Exporter.run(['<sectionId>'], { mode: 'zip' });
 // Progress / cancel the running export
 eclassExporter.current?.stats;
 eclassExporter.current?.cancel();
@@ -134,7 +184,7 @@ Firefox's linter (`web-ext lint`) reports warnings about `innerHTML`. Those writ
 
 ### Releasing
 
-Bump `VERSION` in `src/exporter.js`, run `node build.mjs`, commit, then tag and push:
+Bump `VERSION` in `src/core.js`, run `node build.mjs`, commit, then tag and push:
 
 ```bash
 git tag v1.0.1 && git push origin v1.0.1

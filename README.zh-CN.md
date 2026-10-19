@@ -6,8 +6,12 @@
 课程信息、各 section 内容、标签、文件、作业（含自己的提交和老师批注）、讨论区、Wiki、
 Quiz 回顾、Lesson、Book、Glossary、数据库、H5P、链接，以及“我的成绩”。
 
+同时也能备份 [Echo360](https://echo360.ca) 课程录像的配套内容：转录、幻灯片、Q&A 讨论、你的笔记，
+以及老师允许下载的录像本身（见 [Echo360](#echo360)）。
+
 - **一键备份全部课程**：在任意 eClass 页面点右下角 **⬇ Export eClass** → *Choose courses…* → *Export selected*
 - **单独导出某门课**：进入课程（或课程里任意活动页）→ **⬇ Export eClass** → *Export this course*
+- **Echo360**：打开 Echo360（一般从 eClass 课程里的 Echo360 链接进入），用 **⬇ Export Echo360** 按钮，操作相同
 
 它运行在你已登录的浏览器标签页里，所以能看到的内容和你在 eClass 上能看到的一样；
 不需要密码或 token，除了 eClass 本身不会向任何地方发送数据。
@@ -84,6 +88,43 @@ eClass-Backup/
 
 用浏览器打开 `index.html` 就能离线浏览。所有页面顶部有面包屑导航和 “Open on eClass ↗” 原始链接。
 
+## Echo360
+
+同一个扩展/用户脚本会在 [echo360.ca](https://echo360.ca) 页面加上 **⬇ Export Echo360** 按钮。
+*Choose courses…* 列出你的 Echo360 课程（有录像的默认勾选）；在课程页里点 *Export this course* 只导出这一门。
+可以选和 eClass 备份同一个文件夹：Echo360 的内容放在 `Echo360/` 子文件夹里，两个总目录页互相链接。
+
+每个 lesson 保存：
+
+| | |
+| --- | --- |
+| 转录 | `transcript.vtt`（带时间轴的字幕，可配合视频播放）和 `transcript.txt`；文字也显示在 lesson 页里，方便搜索 |
+| 幻灯片 | 老师上传的原始文件（通常是 PDF），以及每页文字的 `slides.html` |
+| Q&A | `discussions.html`：提问（含在录像中的时间点）和全部回复 |
+| 信息 | 日期、时长、分组/周次、海报图、`lesson.json` |
+| 录像 | **只有老师允许下载时才保存**；否则标记为 🔒 *online only*，链接到 Echo360 在线播放 |
+
+另外每门课有 `my-notes.txt`（你在 Echo360 里记的笔记，有才生成）和列出所有 lesson 的 `index.html`。
+
+```
+eClass-Backup/
+└─ Echo360/
+   ├─ index.html
+   └─ LE-EECS 2101 A - Fundamentals of Data Structure (Fall 2023-2024)/
+      ├─ index.html
+      └─ 02 - LIVE LECTURE SESSION RECORDINGS/
+         └─ 22 - Week 1 - Session 1/
+            ├─ index.html
+            ├─ transcript.vtt
+            ├─ transcript.txt
+            ├─ Week 1.pdf
+            └─ slides.html
+```
+
+**关于录像**：学生能否下载录像由老师按课程设置，只有老师允许时 Echo360 才提供下载。工具只使用这个官方下载，
+不会保存在线播放的流——那等于绕过老师的设置。测试时所有课程都没有开放下载，所以视频下载这条路径还没实际验证过。
+需要某节录像的话，可以请老师开启下载，下次导出会自动保存。
+
 ## 会导出什么 / 不会导出什么
 
 **会**：所有你能访问的活动；受限或隐藏的活动会在课程主页标注 *restricted* 和限制条件。
@@ -103,13 +144,17 @@ eClass-Backup/
 ## 开发
 
 ```
-src/exporter.js            唯一的源码（扩展、用户脚本、控制台三种形态共用）
-build.mjs                  生成 extension/（Chrome）、dist/firefox/ 与 dist/eclass-exporter.user.js
+src/core.js                共用部分：文件命名、文件夹/ZIP 写入、HTML 模板、面板样式
+src/eclass.js              eClass 导出（在 eclass.yorku.ca 上运行）
+src/echo360.js             Echo360 导出（在 echo360.ca 上运行）
+build.mjs                  把 core + 各站点打包成 extension/（Chrome）、dist/firefox/ 与 dist/eclass-exporter.user.js
 docs/eclass-structure.md   eClass 结构探索笔记（接口、选择器、限流、各模块抓取方式）
+docs/echo360-structure.md  Echo360 结构探索笔记
 .github/workflows/         CI 构建检查与自动发布
 ```
 
-修改 `src/exporter.js` 后运行：
+`src/` 里的文件不能单独运行：`build.mjs` 会把 `core.js` 和各站点文件放进同一个函数作用域。
+修改 `src/` 后运行：
 
 ```bash
 node build.mjs
@@ -120,6 +165,8 @@ node build.mjs
 ```js
 // 导出指定课程 id，ZIP 模式
 await eclassExporter.run([138507], { mode: 'zip', maxMB: 200 });
+// 在 echo360.ca 上：按 section id 导出 Echo360 课程
+await echo360Exporter.run(['<sectionId>'], { mode: 'zip' });
 // 当前进度 / 取消
 eclassExporter.current?.stats;
 eclassExporter.current?.cancel();
@@ -130,7 +177,7 @@ Firefox 的 `web-ext lint` 会对 `innerHTML` 报警告：这些写入都发生�
 
 ### 发布新版本
 
-修改 `src/exporter.js` 里的 `VERSION`，运行 `node build.mjs` 并提交，然后打标签推送：
+修改 `src/core.js` 里的 `VERSION`，运行 `node build.mjs` 并提交，然后打标签推送：
 
 ```bash
 git tag v1.0.1 && git push origin v1.0.1

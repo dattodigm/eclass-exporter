@@ -14,7 +14,7 @@ jobs:
         with:
           node-version: 22
       - name: Syntax check
-        run: node --check src/exporter.js
+        run: node --check extension/eclass.js && node --check extension/echo360.js && node --check dist/eclass-exporter.user.js
       - name: Build
         run: node build.mjs
       - name: Committed builds are up to date

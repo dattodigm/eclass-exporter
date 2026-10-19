@@ -1,30 +1,18 @@
-/*
- * eClass Exporter — back up YorkU eClass (Moodle 5.x) courses for offline use.
- *
- * Runs in the logged-in browser tab, so it sees exactly what you see on eClass:
- *   - as a Chrome/Edge extension content script (extension/),
- *   - as a Tampermonkey/Violentmonkey userscript (dist/eclass-exporter.user.js),
- *   - or pasted into the DevTools console on any eclass.yorku.ca page.
- *
- * Read-only by design: it only issues GET requests plus three read-only AJAX
- * calls (course state, course list, forum posts). It never submits forms,
- * starts quiz attempts or changes preferences. Opening activity pages is
- * logged by eClass as a "view", the same as clicking through them yourself.
- */
+/* eClass Exporter 1.1.0 — https://github.com/dattodigm/eclass-exporter — built from src/ by build.mjs; do not edit. */
 (() => {
   'use strict';
+  const host = location.hostname;
 
-  const NS = '__eclassExporter';
-  if (window[NS]) return;
-
-  const VERSION = '1.0.0';
+/*
+ * Shared core of the exporters: naming, folder/ZIP writers, HTML template, panel CSS.
+ * Not a standalone script: build.mjs wraps it, together with the site files
+ * (eclass.js, echo360.js), into one function scope per bundle.
+ */
+  const VERSION = '1.1.0';
   const ORIGIN = location.origin;
   // Path segment limits keep full paths under Windows' 260-char MAX_PATH.
   const LIMITS = { course: 64, section: 36, item: 40, file: 60, child: 48, folderSeg: 36 };
   const ZIP_PART_LIMIT = 3.5 * 1024 ** 3; // split ZIPs before the 4 GB ZIP32 limit
-  const MIN_INTERVAL_MS = 350; // ≈3 eClass requests per second
-  const MAX_INTERVAL_MS = 3000;
-  const MAX_PAUSES = 6; // 1+2+4+8+10+10 minutes of waiting before giving up
 
   // ------------------------------------------------------------------ utils
 
@@ -189,161 +177,6 @@
       while (i < list.length && !x.abort.signal.aborted) await fn(list[i++]);
     };
     await Promise.all(Array.from({ length: Math.min(n, list.length) }, worker));
-  }
-
-  // ------------------------------------------------------------------- HTTP
-
-  class SessionExpired extends Error {
-    constructor() {
-      super('Your eClass session has expired. Log in again and re-run the export; files that were already saved will be skipped.');
-      this.name = 'SessionExpired';
-    }
-  }
-
-  function findSesskey() {
-    for (const s of document.scripts) {
-      const m = /"sesskey":"([^"]+)"/.exec(s.textContent);
-      if (m) return m[1];
-    }
-    const a = document.querySelector('a[href*="sesskey="]');
-    if (a) return new URL(a.href).searchParams.get('sesskey');
-    const i = document.querySelector('input[name="sesskey"]');
-    return i ? i.value : null;
-  }
-
-  class Http {
-    constructor(x) {
-      this.x = x;
-      this.pages = limiter(3);
-      this.files = limiter(3);
-      this.sesskey = findSesskey();
-      // eClass sits behind an AWS load balancer that answers 403 to every request from a
-      // client that sends too many (~9 req/s for a few minutes was enough), so requests to
-      // eClass are spaced out. File bodies come from the CDN and are not throttled.
-      this.interval = MIN_INTERVAL_MS;
-      this.nextAt = 0;
-      this.pausedUntil = 0;
-      this.pauses = 0;
-    }
-
-    get signal() { return this.x.abort.signal; }
-
-    /** Wait for this request's turn: at most one eClass request per `interval`, none while paused. */
-    async gate() {
-      for (;;) {
-        if (this.signal.aborted) throw this.x.fatal || new DOMException('Aborted', 'AbortError');
-        const wait = Math.max(this.pausedUntil, this.nextAt) - Date.now();
-        if (wait <= 0) break;
-        await sleep(Math.min(wait, 2000));
-      }
-      this.nextAt = Date.now() + this.interval;
-      this.x.stats.requests++;
-    }
-
-    async isRateLimited(r) {
-      if (r.status === 429) return true;
-      if (r.status !== 403) return false;
-      const body = await r.clone().text().catch(() => '');
-      return body.length < 3000 && /<h1>\s*403 Forbidden\s*<\/h1>/i.test(body) && !/moodle|eclass/i.test(body);
-    }
-
-    rateLimited() {
-      if (Date.now() < this.pausedUntil) return; // already pausing
-      this.pauses++;
-      if (this.pauses > MAX_PAUSES) {
-        const err = new Error('eClass keeps refusing requests (HTTP 403 from its load balancer). Wait 15–30 minutes and run the export again into the same folder; saved files will be skipped.');
-        err.name = 'Blocked';
-        this.x.cancel(err);
-        throw err;
-      }
-      const secs = Math.min(60 * 2 ** (this.pauses - 1), 600);
-      this.pausedUntil = Date.now() + secs * 1000;
-      this.interval = Math.min(this.interval * 2, MAX_INTERVAL_MS);
-      this.x.log(`⏸ eClass is limiting requests (HTTP 403). Pausing ${secs} s, then continuing at ${(1000 / this.interval).toFixed(1)} requests/s…`, 'warn');
-    }
-
-    async fetch(url, init = {}) {
-      const toEclass = new URL(url, ORIGIN).origin === ORIGIN;
-      let last;
-      for (let i = 0; i < 4; i++) {
-        try {
-          if (toEclass) await this.gate();
-          else if (this.signal.aborted) throw this.x.fatal || new DOMException('Aborted', 'AbortError');
-          // Default credentials ("same-origin"): eClass cookies are sent, but files
-          // redirect to a CloudFront CDN whose wildcard CORS rejects credentialed requests.
-          const r = await fetch(url, { ...init, signal: this.signal });
-          if (toEclass && (await this.isRateLimited(r))) {
-            r.body?.cancel();
-            this.rateLimited();
-            i--; // waiting out a rate limit does not use up a retry
-            continue;
-          }
-          if (r.status >= 500 && i < 3) {
-            r.body?.cancel();
-            last = new Error(`HTTP ${r.status}`);
-            await sleep(1500 * 2 ** i);
-            continue;
-          }
-          if (/\/login\/index\.php/.test(r.url)) throw this.expired();
-          return r;
-        } catch (e) {
-          if (isAbort(e)) throw e;
-          last = e;
-          // A cross-origin redirect to Passport York fails CORS with a TypeError.
-          if (e instanceof TypeError && !(await this.sessionAlive())) throw this.expired();
-          await sleep(1500 * 2 ** i);
-        }
-      }
-      throw last;
-    }
-
-    expired() {
-      const err = new SessionExpired();
-      this.x.cancel(err); // stop every other in-flight request too
-      return err;
-    }
-
-    async sessionAlive() {
-      try {
-        const r = await fetch(`${ORIGIN}/lib/ajax/service.php?sesskey=${encodeURIComponent(this.sesskey)}&info=core_session_time_remaining`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify([{ index: 0, methodname: 'core_session_time_remaining', args: {} }]),
-        });
-        const j = await r.json();
-        return !!(j[0] && !j[0].error && j[0].data.timeremaining > 0);
-      } catch { return true; } // network trouble: don't misreport as logout
-    }
-
-    /** Fetch and parse an HTML page. */
-    page(url) {
-      return this.pages(async () => {
-        const r = await this.fetch(abs(url));
-        const html = await r.text();
-        this.x.stats.pages++;
-        return { url: r.url, status: r.status, doc: parseHtml(html) };
-      });
-    }
-
-    async ajax(methodname, args) {
-      const r = await this.fetch(`${ORIGIN}/lib/ajax/service.php?sesskey=${encodeURIComponent(this.sesskey)}&info=${methodname}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify([{ index: 0, methodname, args }]),
-      });
-      if (!/json/.test(r.headers.get('content-type') || '')) {
-        r.body?.cancel();
-        throw new Error(`${methodname}: HTTP ${r.status}, unexpected response`);
-      }
-      const j = await r.json();
-      const res = Array.isArray(j) ? j[0] : j;
-      if (!res || res.error) {
-        const ex = (res && res.exception) || j || {};
-        if (['servicerequireslogin', 'invalidsesskey'].includes(ex.errorcode)) throw this.expired();
-        const err = new Error(`${methodname}: ${ex.errorcode || ''} ${ex.message || ''}`.trim());
-        err.code = ex.errorcode;
-        throw err;
-      }
-      return res.data;
-    }
   }
 
   // ------------------------------------------------------------------ sinks
@@ -535,11 +368,11 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere}
 .xp-courses th{font-size:12px;color:#6a737b;text-transform:uppercase}
 `;
 
-  function pageHtml({ title, body, crumbs = [], pagePath, source, heading = true }) {
+  function pageHtml({ title, body, crumbs = [], pagePath, source, heading = true, sourceLabel = 'Open on eClass ↗' }) {
     const nav = crumbs
       .map((c) => (c.path ? `<a href="${esc(relHref(pagePath, c.path, c.hash))}">${esc(c.title)}</a>` : `<span>${esc(c.title)}</span>`))
       .join(' › ');
-    const src = source ? `<a href="${esc(source)}" target="_blank" rel="noopener">Open on eClass ↗</a> · ` : '';
+    const src = source ? `<a href="${esc(source)}" target="_blank" rel="noopener">${esc(sourceLabel)}</a> · ` : '';
     return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="generator" content="eClass Exporter ${VERSION}"><title>${esc(title)}</title><style>${PAGE_CSS}</style></head>
@@ -547,6 +380,213 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere}
 <main class="xp-main">${heading ? `<h1 class="xp-title">${esc(title)}</h1>` : ''}
 ${body}
 </main></body></html>`;
+  }
+
+  // ------------------------------------------------------------- panel CSS
+
+  const UI_CSS = `
+:host{all:initial}
+*{box-sizing:border-box;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+[hidden]{display:none!important}
+.fab{position:fixed;right:20px;bottom:20px;z-index:2147483646;border:0;border-radius:24px;padding:10px 16px;background:#e31837;color:#fff;font-size:14px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,.25);cursor:pointer}
+.fab:hover{background:#c3122d}
+.panel{position:fixed;right:20px;bottom:72px;z-index:2147483647;width:440px;max-width:calc(100vw - 32px);max-height:calc(100vh - 100px);display:flex;flex-direction:column;background:#fff;color:#1d2125;border:1px solid #dee2e6;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.25);font-size:13px;overflow:hidden}
+.panel[hidden]{display:none}
+header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid #eef0f2}
+header b{font-size:15px}
+header button{border:0;background:none;font-size:18px;cursor:pointer;color:#6a737b}
+.body{padding:12px 16px;overflow:auto;display:flex;flex-direction:column;gap:12px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.btn{border:1px solid #c9ced3;background:#fff;border-radius:8px;padding:7px 12px;font-size:13px;cursor:pointer;color:#1d2125}
+.btn.primary{background:#e31837;border-color:#e31837;color:#fff;font-weight:600}
+.btn:disabled{opacity:.5;cursor:default}
+fieldset{border:1px solid #eef0f2;border-radius:8px;padding:8px 10px;margin:0}
+legend{color:#6a737b;font-size:12px;padding:0 4px}
+label{display:flex;gap:6px;align-items:center;margin:3px 0;cursor:pointer}
+input[type=number]{width:70px;padding:3px 6px;border:1px solid #c9ced3;border-radius:6px}
+input[type=search]{flex:1;padding:6px 8px;border:1px solid #c9ced3;border-radius:6px}
+.list{max-height:220px;overflow:auto;border:1px solid #eef0f2;border-radius:8px;padding:4px 8px}
+.list label{align-items:flex-start}
+.list .cat{color:#6a737b;font-size:11px}
+.muted{color:#6a737b;font-size:12px}
+.bar{height:8px;background:#eef0f2;border-radius:4px;overflow:hidden}
+.bar>div{height:100%;width:0;background:#e31837;transition:width .3s}
+.log{height:170px;overflow:auto;background:#f7f8f9;border:1px solid #eef0f2;border-radius:8px;padding:6px 8px;font:11.5px/1.45 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
+.log .error{color:#b02a37}.log .warn{color:#946200}.log .ok{color:#1e7b34}
+`;
+
+  const site_eclass = () => {
+/*
+ * eClass Exporter — back up YorkU eClass (Moodle 5.x) courses for offline use.
+ *
+ * Read-only by design: it only issues GET requests plus three read-only AJAX
+ * calls (course state, course list, forum posts). It never submits forms,
+ * starts quiz attempts or changes preferences. Opening activity pages is
+ * logged by eClass as a "view", the same as clicking through them yourself.
+ *
+ * Not a standalone script: build.mjs runs this file as the body of a function,
+ * after src/core.js, on eclass.yorku.ca pages.
+ */
+  const NS = '__eclassExporter';
+  if (window[NS]) return;
+
+  const MIN_INTERVAL_MS = 350; // ≈3 eClass requests per second
+  const MAX_INTERVAL_MS = 3000;
+  const MAX_PAUSES = 6; // 1+2+4+8+10+10 minutes of waiting before giving up
+
+  // ------------------------------------------------------------------- HTTP
+
+  class SessionExpired extends Error {
+    constructor() {
+      super('Your eClass session has expired. Log in again and re-run the export; files that were already saved will be skipped.');
+      this.name = 'SessionExpired';
+    }
+  }
+
+  function findSesskey() {
+    for (const s of document.scripts) {
+      const m = /"sesskey":"([^"]+)"/.exec(s.textContent);
+      if (m) return m[1];
+    }
+    const a = document.querySelector('a[href*="sesskey="]');
+    if (a) return new URL(a.href).searchParams.get('sesskey');
+    const i = document.querySelector('input[name="sesskey"]');
+    return i ? i.value : null;
+  }
+
+  class Http {
+    constructor(x) {
+      this.x = x;
+      this.pages = limiter(3);
+      this.files = limiter(3);
+      this.sesskey = findSesskey();
+      // eClass sits behind an AWS load balancer that answers 403 to every request from a
+      // client that sends too many (~9 req/s for a few minutes was enough), so requests to
+      // eClass are spaced out. File bodies come from the CDN and are not throttled.
+      this.interval = MIN_INTERVAL_MS;
+      this.nextAt = 0;
+      this.pausedUntil = 0;
+      this.pauses = 0;
+    }
+
+    get signal() { return this.x.abort.signal; }
+
+    /** Wait for this request's turn: at most one eClass request per `interval`, none while paused. */
+    async gate() {
+      for (;;) {
+        if (this.signal.aborted) throw this.x.fatal || new DOMException('Aborted', 'AbortError');
+        const wait = Math.max(this.pausedUntil, this.nextAt) - Date.now();
+        if (wait <= 0) break;
+        await sleep(Math.min(wait, 2000));
+      }
+      this.nextAt = Date.now() + this.interval;
+      this.x.stats.requests++;
+    }
+
+    async isRateLimited(r) {
+      if (r.status === 429) return true;
+      if (r.status !== 403) return false;
+      const body = await r.clone().text().catch(() => '');
+      return body.length < 3000 && /<h1>\s*403 Forbidden\s*<\/h1>/i.test(body) && !/moodle|eclass/i.test(body);
+    }
+
+    rateLimited() {
+      if (Date.now() < this.pausedUntil) return; // already pausing
+      this.pauses++;
+      if (this.pauses > MAX_PAUSES) {
+        const err = new Error('eClass keeps refusing requests (HTTP 403 from its load balancer). Wait 15–30 minutes and run the export again into the same folder; saved files will be skipped.');
+        err.name = 'Blocked';
+        this.x.cancel(err);
+        throw err;
+      }
+      const secs = Math.min(60 * 2 ** (this.pauses - 1), 600);
+      this.pausedUntil = Date.now() + secs * 1000;
+      this.interval = Math.min(this.interval * 2, MAX_INTERVAL_MS);
+      this.x.log(`⏸ eClass is limiting requests (HTTP 403). Pausing ${secs} s, then continuing at ${(1000 / this.interval).toFixed(1)} requests/s…`, 'warn');
+    }
+
+    async fetch(url, init = {}) {
+      const toEclass = new URL(url, ORIGIN).origin === ORIGIN;
+      let last;
+      for (let i = 0; i < 4; i++) {
+        try {
+          if (toEclass) await this.gate();
+          else if (this.signal.aborted) throw this.x.fatal || new DOMException('Aborted', 'AbortError');
+          // Default credentials ("same-origin"): eClass cookies are sent, but files
+          // redirect to a CloudFront CDN whose wildcard CORS rejects credentialed requests.
+          const r = await fetch(url, { ...init, signal: this.signal });
+          if (toEclass && (await this.isRateLimited(r))) {
+            r.body?.cancel();
+            this.rateLimited();
+            i--; // waiting out a rate limit does not use up a retry
+            continue;
+          }
+          if (r.status >= 500 && i < 3) {
+            r.body?.cancel();
+            last = new Error(`HTTP ${r.status}`);
+            await sleep(1500 * 2 ** i);
+            continue;
+          }
+          if (/\/login\/index\.php/.test(r.url)) throw this.expired();
+          return r;
+        } catch (e) {
+          if (isAbort(e)) throw e;
+          last = e;
+          // A cross-origin redirect to Passport York fails CORS with a TypeError.
+          if (e instanceof TypeError && !(await this.sessionAlive())) throw this.expired();
+          await sleep(1500 * 2 ** i);
+        }
+      }
+      throw last;
+    }
+
+    expired() {
+      const err = new SessionExpired();
+      this.x.cancel(err); // stop every other in-flight request too
+      return err;
+    }
+
+    async sessionAlive() {
+      try {
+        const r = await fetch(`${ORIGIN}/lib/ajax/service.php?sesskey=${encodeURIComponent(this.sesskey)}&info=core_session_time_remaining`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify([{ index: 0, methodname: 'core_session_time_remaining', args: {} }]),
+        });
+        const j = await r.json();
+        return !!(j[0] && !j[0].error && j[0].data.timeremaining > 0);
+      } catch { return true; } // network trouble: don't misreport as logout
+    }
+
+    /** Fetch and parse an HTML page. */
+    page(url) {
+      return this.pages(async () => {
+        const r = await this.fetch(abs(url));
+        const html = await r.text();
+        this.x.stats.pages++;
+        return { url: r.url, status: r.status, doc: parseHtml(html) };
+      });
+    }
+
+    async ajax(methodname, args) {
+      const r = await this.fetch(`${ORIGIN}/lib/ajax/service.php?sesskey=${encodeURIComponent(this.sesskey)}&info=${methodname}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify([{ index: 0, methodname, args }]),
+      });
+      if (!/json/.test(r.headers.get('content-type') || '')) {
+        r.body?.cancel();
+        throw new Error(`${methodname}: HTTP ${r.status}, unexpected response`);
+      }
+      const j = await r.json();
+      const res = Array.isArray(j) ? j[0] : j;
+      if (!res || res.error) {
+        const ex = (res && res.exception) || j || {};
+        if (['servicerequireslogin', 'invalidsesskey'].includes(ex.errorcode)) throw this.expired();
+        const err = new Error(`${methodname}: ${ex.errorcode || ''} ${ex.message || ''}`.trim());
+        err.code = ex.errorcode;
+        throw err;
+      }
+      return res.data;
+    }
   }
 
   const REMOVE_SELECTORS = [
@@ -1441,7 +1481,8 @@ ${dates ? `<div class="xp-desc xp-note">${esc(dates)}</div>` : ''}${alt ? `<div 
         const status = c.status === 'ok' ? `${c.ok}/${c.items} items · ${c.files} new files${c.errors ? ` · <span class="xp-note err">${c.errors} errors</span>` : ''}` : `<span class="xp-note">${esc(c.note || c.status)}</span>`;
         return `<tr><td>${name}<div class="xp-note">${esc(c.shortname || '')}</div></td><td>${esc(c.category || '')}</td><td>${esc([fmtDate(c.startdate), fmtDate(c.enddate)].filter(Boolean).join(' – '))}</td><td>${status}</td><td class="xp-note">${esc(new Date(c.exportedAt).toLocaleString())}</td></tr>`;
       }).join('\n');
-      const body = `<p class="xp-note">${courses.filter((c) => c.status === 'ok').length} of ${courses.length} courses saved from <a href="${ORIGIN}">${ORIGIN}</a>.</p>
+      const echo = this.sink.kind === 'folder' && (await this.sink.exists('Echo360/index.html')) > 0;
+      const body = `${echo ? '<p><a href="Echo360/index.html">Echo360 lecture recordings →</a></p>' : ''}<p class="xp-note">${courses.filter((c) => c.status === 'ok').length} of ${courses.length} courses saved from <a href="${ORIGIN}">${ORIGIN}</a>.</p>
 <table class="xp-courses"><thead><tr><th>Course</th><th>Term</th><th>Dates</th><th>Contents</th><th>Saved</th></tr></thead><tbody>${rows}</tbody></table>`;
       if (this.sink.kind === 'zip') await this.sink.open('eClass-index');
       await this.sink.write('index.html', pageHtml({ title: 'eClass backup', body, pagePath: 'index.html' }));
@@ -1451,37 +1492,6 @@ ${dates ? `<div class="xp-desc xp-note">${esc(dates)}</div>` : ''}${alt ? `<div 
   }
 
   // --------------------------------------------------------------------- UI
-
-  const UI_CSS = `
-:host{all:initial}
-*{box-sizing:border-box;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-[hidden]{display:none!important}
-.fab{position:fixed;right:20px;bottom:20px;z-index:2147483646;border:0;border-radius:24px;padding:10px 16px;background:#e31837;color:#fff;font-size:14px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,.25);cursor:pointer}
-.fab:hover{background:#c3122d}
-.panel{position:fixed;right:20px;bottom:72px;z-index:2147483647;width:440px;max-width:calc(100vw - 32px);max-height:calc(100vh - 100px);display:flex;flex-direction:column;background:#fff;color:#1d2125;border:1px solid #dee2e6;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.25);font-size:13px;overflow:hidden}
-.panel[hidden]{display:none}
-header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid #eef0f2}
-header b{font-size:15px}
-header button{border:0;background:none;font-size:18px;cursor:pointer;color:#6a737b}
-.body{padding:12px 16px;overflow:auto;display:flex;flex-direction:column;gap:12px}
-.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-.btn{border:1px solid #c9ced3;background:#fff;border-radius:8px;padding:7px 12px;font-size:13px;cursor:pointer;color:#1d2125}
-.btn.primary{background:#e31837;border-color:#e31837;color:#fff;font-weight:600}
-.btn:disabled{opacity:.5;cursor:default}
-fieldset{border:1px solid #eef0f2;border-radius:8px;padding:8px 10px;margin:0}
-legend{color:#6a737b;font-size:12px;padding:0 4px}
-label{display:flex;gap:6px;align-items:center;margin:3px 0;cursor:pointer}
-input[type=number]{width:70px;padding:3px 6px;border:1px solid #c9ced3;border-radius:6px}
-input[type=search]{flex:1;padding:6px 8px;border:1px solid #c9ced3;border-radius:6px}
-.list{max-height:220px;overflow:auto;border:1px solid #eef0f2;border-radius:8px;padding:4px 8px}
-.list label{align-items:flex-start}
-.list .cat{color:#6a737b;font-size:11px}
-.muted{color:#6a737b;font-size:12px}
-.bar{height:8px;background:#eef0f2;border-radius:4px;overflow:hidden}
-.bar>div{height:100%;width:0;background:#e31837;transition:width .3s}
-.log{height:170px;overflow:auto;background:#f7f8f9;border:1px solid #eef0f2;border-radius:8px;padding:6px 8px;font:11.5px/1.45 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
-.log .error{color:#b02a37}.log .warn{color:#946200}.log .ok{color:#1e7b34}
-`;
 
   class Panel {
     constructor() {
@@ -1710,4 +1720,8 @@ input[type=search]{flex:1;padding:6px 8px;border:1px solid #c9ced3;border-radius
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
+
+  };
+
+  if (host === 'eclass.yorku.ca') site_eclass();
 })();

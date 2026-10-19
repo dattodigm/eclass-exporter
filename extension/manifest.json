@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "eClass Exporter (YorkU)",
-  "version": "1.0.0",
-  "description": "Back up eClass courses (content, files, assignments, forums, wikis, quizzes, grades) for offline use.",
+  "name": "eClass & Echo360 Exporter (YorkU)",
+  "version": "1.1.0",
+  "description": "Back up YorkU eClass courses and Echo360 lectures (content, files, assignments, forums, transcripts, slides, Q&A, grades) for offline use.",
   "homepage_url": "https://github.com/dattodigm/eclass-exporter",
   "content_scripts": [
     {
@@ -10,7 +10,17 @@
         "https://eclass.yorku.ca/*"
       ],
       "js": [
-        "exporter.js"
+        "eclass.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "https://echo360.ca/*"
+      ],
+      "js": [
+        "echo360.js"
       ],
       "run_at": "document_idle",
       "all_frames": false
