@@ -7,7 +7,7 @@
 Quiz 回顾、Lesson、Book、Glossary、数据库、H5P、链接，以及“我的成绩”。
 
 同时也能备份 [Echo360](https://echo360.ca) 课程录像的配套内容：转录、幻灯片、Q&A 讨论、你的笔记，
-以及老师允许下载的录像本身（见 [Echo360](#echo360)）。
+以及录像本身（即使老师关闭了下载，见 [Echo360](#echo360)）。
 
 - **一键备份全部课程**：在任意 eClass 页面点右下角 **⬇ Export eClass** → *Choose courses…* → *Export selected*
 - **单独导出某门课**：进入课程（或课程里任意活动页）→ **⬇ Export eClass** → *Export this course*
@@ -102,7 +102,7 @@ eClass-Backup/
 | 幻灯片 | 老师上传的原始文件（通常是 PDF），以及每页文字的 `slides.html` |
 | Q&A | `discussions.html`：提问（含在录像中的时间点）和全部回复 |
 | 信息 | 日期、时长、分组/周次、海报图、`lesson.json` |
-| 录像 | **只有老师允许下载时才保存**；否则标记为 🔒 *online only*，链接到 Echo360 在线播放 |
+| 录像 | `recording.mp4`：老师允许下载时用 Echo360 的官方下载；否则抓取播放器所用的 HLS 流，把分开的视频/音频分片合并成一个 MP4（不重新编码）。受 DRM 保护的流会跳过。 |
 
 另外每门课有 `my-notes.txt`（你在 Echo360 里记的笔记，有才生成）和列出所有 lesson 的 `index.html`。
 
@@ -115,15 +115,17 @@ eClass-Backup/
       └─ 02 - LIVE LECTURE SESSION RECORDINGS/
          └─ 22 - Week 1 - Session 1/
             ├─ index.html
+            ├─ recording.mp4
             ├─ transcript.vtt
             ├─ transcript.txt
             ├─ Week 1.pdf
             └─ slides.html
 ```
 
-**关于录像**：学生能否下载录像由老师按课程设置，只有老师允许时 Echo360 才提供下载。工具只使用这个官方下载，
-不会保存在线播放的流——那等于绕过老师的设置。测试时所有课程都没有开放下载，所以视频下载这条路径还没实际验证过。
-需要某节录像的话，可以请老师开启下载，下次导出会自动保存。
+**关于录像**：如果老师关闭了下载，导出器会直接保存 Echo360 播放器所用的同一份 HLS 流。Echo360 通常把视频和
+音频存成两条独立的分片流，导出器会都下载下来，按时间合并成一个 `recording.mp4`，不重新编码，所以分辨率和
+音质保持原样。两小时的课大约 250–500 MB，整门课建议用 *Save to a folder*。受 DRM 保护的流会被识别并跳过，
+对应 lesson 仍然链接到 Echo360 在线播放。
 
 ## 会导出什么 / 不会导出什么
 

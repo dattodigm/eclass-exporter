@@ -1743,12 +1743,12 @@ ${dates ? `<div class="xp-desc xp-note">${esc(dates)}</div>` : ''}${alt ? `<div 
 /*
  * Echo360 Exporter — back up your Echo360 course recordings' companions for offline use:
  * lesson list, transcripts (VTT + TXT), slide decks (original PDF + slide text),
- * Q&A discussions, your notes, posters, and the recordings themselves where the
- * instructor allows downloads.
+ * Q&A discussions, your notes, posters, and the recordings themselves.
  *
- * Videos are only saved through Echo360's own download option. When an instructor
- * has turned downloads off, the lesson page records that and links to the online
- * player instead; the exporter never pulls the streaming copy.
+ * Recordings use Echo360's download when the instructor allows it. Otherwise the
+ * exporter downloads the same HLS stream the player plays (video and audio are
+ * usually separate renditions), muxes the fragments into one MP4 without
+ * re-encoding, and never touches DRM-protected streams.
  *
  * Read-only: GET requests only. Not a standalone script: build.mjs runs this file
  * as the body of a function, after src/core.js, on echo360.ca pages.
@@ -1792,6 +1792,7 @@ ${dates ? `<div class="xp-desc xp-note">${esc(dates)}</div>` : ''}${alt ? `<div 
       this.pausedUntil = 0;
       this.interval = E_INTERVAL_MS;
       this.cdn = limiter(3);
+      this.hlsKeys = new Map();
     }
 
     get signal() { return this.x.abort.signal; }
@@ -1876,6 +1877,98 @@ ${dates ? `<div class="xp-desc xp-note">${esc(dates)}</div>` : ''}${alt ? `<div 
       const m = /Echo\["echoPlayerV2FullApp"\]\("((?:\\.|[^"\\])*)"\)/.exec(html);
       if (!m) return null;
       return JSON.parse(JSON.parse(`"${m[1]}"`));
+    }
+
+    /** An HLS master or media playlist (Echo360 serves both from content.echo360.ca). */
+    async hlsPlaylist(url) {
+      const r = await this.fetch(url);
+      if (!r.ok) {
+        r.body?.cancel();
+        const err = new Error(`HTTP ${r.status}`);
+        err.status = r.status;
+        throw err;
+      }
+      const text = await r.text();
+      return /^#EXT-X-STREAM-INF:/m.test(text)
+        ? { master: true, ...parseHlsMaster(text, url) }
+        : { master: false, ...parseHlsMedia(text, url) };
+    }
+
+    /** Resolve a playable media URI to a concrete variant and fetch its init segment. */
+    async hlsTrack(url) {
+      let pl = await this.hlsPlaylist(url);
+      let master = null;
+      let variant = null;
+      if (pl.master) {
+        master = pl;
+        variant = pickHlsVariant(pl.variants);
+        if (!variant?.url) throw new Error('the HLS master playlist has no playable variant');
+        pl = await this.hlsPlaylist(variant.url);
+        if (pl.master) throw new Error('nested HLS master playlist');
+      }
+      if (!pl.segments.length) throw new Error('the HLS playlist has no segments');
+      const bad = pl.segments.find((s) => s.key?.unsupported);
+      if (bad) throw new Error(`the stream is encrypted with ${bad.key.method}, which this exporter cannot save`);
+      let initBytes = null;
+      let info = null;
+      if (pl.init?.url) {
+        initBytes = await this.hlsPart(pl.init);
+        info = mp4Info(initBytes);
+        if (info && mp4Boxes(initBytes, info.moov.body, info.moov.end).some((b) => b.type === 'pssh')) {
+          throw new Error('the stream is DRM-protected, which this exporter cannot save');
+        }
+      }
+      return { url, master, variant, media: pl, initBytes, info };
+    }
+
+    /** Fetch one playlist resource, honouring byte ranges and AES-128 keys. */
+    async hlsPart(part) {
+      const headers = {};
+      if (part.range?.length) headers.Range = `bytes=${part.range.offset}-${part.range.offset + part.range.length - 1}`;
+      // Keep the limiter while the body is read, like saveFile does.
+      const res = await this.cdn(async () => {
+        const r = await this.fetch(part.url, Object.keys(headers).length ? { headers } : {});
+        if (!r.ok) {
+          r.body?.cancel();
+          const err = new Error(`HTTP ${r.status}`);
+          err.status = r.status;
+          throw err;
+        }
+        return { status: r.status, bytes: new Uint8Array(await r.arrayBuffer()) };
+      });
+      let bytes = res.bytes;
+      if (part.range?.length) {
+        if (res.status === 200 && bytes.length > part.range.length) bytes = bytes.subarray(part.range.offset, part.range.offset + part.range.length);
+        else if (bytes.length < part.range.length) throw new Error(`short read (${bytes.length}/${part.range.length} bytes)`);
+      }
+      if (part.key) bytes = await this.decryptHls(bytes, part.key, part.seq);
+      return bytes;
+    }
+
+    async decryptHls(bytes, key, seq) {
+      if (key.unsupported) throw new Error(`unsupported encryption ${key.method}`);
+      if (!key.url) throw new Error('the stream key has no URL');
+      let k = this.hlsKeys.get(key.url);
+      if (!k) {
+        const r = await this.fetch(key.url);
+        if (!r.ok) {
+          r.body?.cancel();
+          throw new Error(`HTTP ${r.status} for the stream key`);
+        }
+        k = crypto.subtle.importKey('raw', await r.arrayBuffer(), { name: 'AES-CBC' }, false, ['decrypt']);
+        this.hlsKeys.set(key.url, k);
+      }
+      let iv;
+      if (key.iv) iv = hexBytes(key.iv);
+      else {
+        iv = new Uint8Array(16);
+        new DataView(iv.buffer).setBigUint64(8, BigInt(seq || 0));
+      }
+      try {
+        return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, await k, bytes));
+      } catch (e) {
+        throw new Error(`could not decrypt the stream (${e.message})`);
+      }
     }
   }
 
@@ -1997,26 +2090,44 @@ ${dates ? `<div class="xp-desc xp-note">${esc(dates)}</div>` : ''}${alt ? `<div 
       const label = m.title || m.mediaType;
       const prefix = playableMedias(l).length > 1 ? `${safeName(splitExt(label)[0], 30, false)} - ` : '';
 
-      // Recording: only via Echo360's own download option.
+      // Recording: use Echo360's own download when it is offered. When the
+      // instructor turned downloads off, save the HLS stream the player uses
+      // instead (video and audio are separate renditions and get muxed).
       const offered = [...(info.primaryFiles?.files || []), ...(info.secondaryFiles?.files || []), ...(info.audioFiles || [])];
-      if (!offered.length) {
+      if (!this.opts.videos) {
         l.locked = true;
         this.counts.videosLocked++;
-        l.notes.push(`${label}: video download is turned off for this course — watch it online`);
-      } else if (this.opts.videos) {
-        const pick = offered.find((f) => /hd|high|1080|720/i.test(`${f.label} ${f.fileName}`)) || offered[0];
-        try {
-          const file = await this.http.json(`${base}/file/${encodeURIComponent(pick.fileName)}`);
-          const uri = file?.downloadUri || file;
-          if (typeof uri !== 'string') throw new Error('no download link returned');
-          const ok = await this.saveFile(l, uri, `${l.dir}/${prefix}${safeName(pick.fileName, LIMITS.file)}`, 'video');
-          if (ok) this.counts.videos++;
-        } catch (e) {
-          if (isAbort(e)) throw e;
-          l.notes.push(`${label}: video download failed (${e.message})`);
-        }
+        l.notes.push(offered.length ? `${label}: video download available on Echo360 (videos disabled in options)` : `${label}: recording not saved (videos disabled in options)`);
       } else {
-        l.notes.push(`${label}: video download available on Echo360 (videos disabled in options)`);
+        let saved = false;
+        let downloadError = null;
+        if (offered.length) {
+          const pick = offered.find((f) => /hd|high|1080|720/i.test(`${f.label} ${f.fileName}`)) || offered[0];
+          try {
+            const file = await this.http.json(`${base}/file/${encodeURIComponent(pick.fileName)}`);
+            const uri = file?.downloadUri || file;
+            if (typeof uri !== 'string') throw new Error('no download link returned');
+            saved = await this.saveFile(l, uri, `${l.dir}/${prefix}${safeName(pick.fileName, LIMITS.file)}`, 'video');
+          } catch (e) {
+            if (isAbort(e)) throw e;
+            downloadError = e.message;
+          }
+        }
+        if (!saved) {
+          try {
+            saved = await this.captureStream(l, m, player, prefix);
+          } catch (e) {
+            if (isAbort(e)) throw e;
+            l.notes.push(`${label}: could not save the recording (${e.message})`);
+          }
+        }
+        if (saved) this.counts.videos++;
+        else {
+          l.locked = true;
+          this.counts.videosLocked++;
+          if (downloadError) l.notes.push(`${label}: video download failed (${downloadError})`);
+          l.notes.push(`${label}: recording not saved — watch it online`);
+        }
       }
 
       // Transcripts: offered as files when a transcript exists.
@@ -2046,6 +2157,156 @@ ${dates ? `<div class="xp-desc xp-note">${esc(dates)}</div>` : ''}${alt ? `<div 
         this.counts.transcripts++;
       }
       if (player?.video?.mediaId === m.id) l.duration = player.video.duration;
+    }
+
+    /** Save one media from the HLS stream, muxing separate video/audio renditions. */
+    async captureStream(l, m, player, prefix) {
+      if (this.opts.skipExisting) {
+        for (const ext of ['.mp4', '.m4a', '.ts']) {
+          const existing = `${l.dir}/${prefix}recording${ext}`;
+          const size = await this.x.sink.exists(existing);
+          if (size > 0) {
+            this.x.stats.existing++;
+            l.files.push({ kind: 'video', path: existing, size });
+            return true;
+          }
+        }
+      }
+      const streams = player?.video?.mediaId === m.id
+        ? (player.video.playableMedias || [])
+        : (m.uri ? [m] : []);
+      const source = streams.find((p) => p.trackType?.includes('Audio') && p.trackType?.includes('Video'))
+        || streams.find((p) => p.trackType?.includes('Video'))
+        || streams.find((p) => p.trackType?.includes('Audio'));
+      if (!source?.uri) throw new Error('the player data has no streaming URL for this media');
+      const main = await this.http.hlsTrack(source.uri);
+      const has = (track, type) => !!track.info?.traks.some((t) => t.handler === type);
+
+      // Echo360 often serves video and audio as separate renditions; the
+      // master playlist groups them. Load the matching audio when needed.
+      let audio = null;
+      if (main.info && has(main, 'vide') && !has(main, 'soun')) {
+        const group = main.variant?.audioGroup;
+        let url = group ? pickHlsRendition(main.master?.renditions || [], group)?.url : null;
+        if (!url) {
+          const alt = streams.find((x) => x.trackType?.includes('Audio') && !x.trackType?.includes('Video') && x.uri);
+          if (alt) url = alt.uri;
+        }
+        if (url) {
+          try {
+            const a = await this.http.hlsTrack(url);
+            if (has(a, 'soun')) audio = a;
+            else l.notes.push('audio track: no audio stream found');
+          } catch (e) {
+            if (isAbort(e)) throw e;
+            l.notes.push(`audio track: ${e.message}`);
+          }
+        }
+      }
+
+      const mux = !!(audio && has(main, 'vide'));
+      const ext = main.info && !has(main, 'vide') ? '.m4a' : main.info ? '.mp4' : '.ts';
+      const path = `${l.dir}/${prefix}recording${ext}`;
+
+      const max = this.opts.maxMB > 0 ? this.opts.maxMB * 1024 * 1024 : 0;
+      const sizeOf = (t) => (t.initBytes?.length || 0) + (t.media.segments.every((s) => s.range?.length)
+        ? t.media.segments.reduce((n, s) => n + s.range.length, 0) : 0);
+      const estimate = sizeOf(main) + (mux ? sizeOf(audio) : 0);
+      if (max && estimate && estimate > max) {
+        l.notes.push(`${path.split('/').pop()}: skipped, the stream is about ${fmtBytes(estimate)}, over the size limit`);
+        return false;
+      }
+
+      let init = main.initBytes;
+      let audioId = null;
+      if (mux) {
+        const merged = mp4MergeInit(main, audio);
+        init = merged.init;
+        audioId = merged.audioId;
+      }
+
+      let written = 0;
+      let lastUpdate = 0;
+      const x = this.x;
+      const counted = this.hlsStream(main, mux ? audio : null, init, audioId).pipeThrough(new TransformStream({
+        transform(chunk, ctl) {
+          written += chunk.byteLength;
+          x.stats.bytes += chunk.byteLength;
+          if (max && written > max) { ctl.error(new Error('over the size limit')); return; }
+          ctl.enqueue(chunk);
+          if (Date.now() - lastUpdate > 500) { lastUpdate = Date.now(); x.ui.update(); }
+        },
+      }));
+      try {
+        await this.x.sink.write(path, counted);
+      } catch (e) {
+        if (isAbort(e)) throw e;
+        if (/over the size limit/.test(e.message)) {
+          l.notes.push(`${path.split('/').pop()}: skipped, over the size limit`);
+          return false;
+        }
+        throw e;
+      }
+      this.x.stats.files++;
+      this.counts.files++;
+      l.files.push({ kind: 'video', path, size: written });
+      this.x.ui.update();
+      return true;
+    }
+
+    /** Read the player's HLS stream as one continuous file, in decode order. */
+    hlsStream(main, audio, init, audioId) {
+      const job = this;
+      async function* chunks() {
+        if (init) yield init;
+        const vIt = job.hlsFragments(main);
+        if (!audio) {
+          for await (const f of vIt) yield f.bytes;
+          return;
+        }
+        const aIt = job.hlsFragments(audio, audioId);
+        let v = await vIt.next();
+        let a = await aIt.next();
+        while (!v.done || !a.done) {
+          if (a.done || (!v.done && v.value.time <= a.value.time)) {
+            yield v.value.bytes;
+            v = await vIt.next();
+          } else {
+            yield a.value.bytes;
+            a = await aIt.next();
+          }
+        }
+      }
+      const it = chunks();
+      return new ReadableStream({
+        async pull(ctl) {
+          try {
+            const { done, value } = await it.next();
+            if (done) ctl.close();
+            else ctl.enqueue(value);
+          } catch (e) { ctl.error(e); }
+        },
+        async cancel() { await it.return?.(); },
+      });
+    }
+
+    async *hlsFragments(track, newId) {
+      const timescale = track.info?.traks[0]?.timescale || 1;
+      const oldId = newId != null ? track.info?.traks.find((t) => t.handler === 'soun')?.id : null;
+      let n = 0;
+      for (const seg of track.media.segments) {
+        n++;
+        let bytes;
+        try {
+          bytes = await this.http.hlsPart(seg);
+        } catch (e) {
+          if (isAbort(e)) throw e;
+          throw new Error(`segment ${Math.round(seg.start)}s (${n}/${track.media.segments.length}): ${e.message}`);
+        }
+        for (const frag of mp4Fragments(bytes, timescale, seg.start)) {
+          yield { time: frag.time, bytes: oldId != null ? mp4PatchTrackId(frag.bytes, oldId, newId) : frag.bytes };
+        }
+      }
     }
 
     async exportSlides(l, slides) {
@@ -2215,15 +2476,273 @@ ${transcript}`;
       }
       const c = this.counts;
       const body = `<dl class="xp-facts"><dt>Course</dt><dd>${esc(`${s.courseCode} — ${s.courseName}`)}</dd><dt>Section</dt><dd>${esc(s.sectionName)}</dd><dt>Term</dt><dd>${esc(s.termName || '')}</dd>
-<dt>Saved</dt><dd>${c.ok}/${c.lessons} lessons · ${c.transcripts} transcripts · ${c.slides} slide decks · ${c.questions} questions · ${c.videos} videos${c.videosLocked ? ` (${c.videosLocked} online only)` : ''}</dd></dl>
+<dt>Saved</dt><dd>${c.ok}/${c.lessons} lessons · ${c.transcripts} transcripts · ${c.slides} slide decks · ${c.questions} questions · ${c.videos} recordings${c.videosLocked ? ` (${c.videosLocked} not saved)` : ''}</dd></dl>
 <div class="xp-links"><a href="${esc(`${EORIGIN}/section/${s.sectionId}/home`)}" target="_blank" rel="noopener">Open on Echo360 ↗</a>${this.hasNotes ? '<a href="my-notes.txt">My notes</a>' : ''}<a href="section.json">section.json</a></div>
-${c.videosLocked ? '<p class="xp-note">🔒 The instructor turned off video downloads for these recordings, so they are listed with their transcripts, slides and discussions and link to the online player.</p>' : ''}
+${c.videosLocked ? '<p class="xp-note">🔒 Some recordings could not be saved — their lessons list the reason and link to the online player.</p>' : ''}
 <table class="xp-courses"><thead><tr><th>Lesson</th><th>Date</th><th>Length</th><th>Saved</th></tr></thead><tbody>${rows.join('\n')}</tbody></table>`;
       await this.x.sink.write(this.indexPath, page({ title: s.label, body, pagePath: this.indexPath, crumbs: [{ title: 'Echo360', path: `${ROOT}/index.html` }] }));
     }
   }
 
   const playableMedias = (l) => l.medias.filter((m) => m.mediaType === 'Video' || m.mediaType === 'Audio');
+
+  // ------------------------------------------------------------ HLS capture
+
+  // Echo360 serves recordings as HLS with fragmented MP4 segments (and often
+  // separate video and audio renditions, because the player muxes them itself).
+  // The exporter downloads the same playlist the player uses and joins the
+  // fragments: video-only and audio-only renditions are combined by merging
+  // their moov headers and interleaving the fragments by decode time. Nothing
+  // is re-encoded, so the saved file has the original quality.
+  //
+  // Only unencrypted or AES-128 HLS is supported. DRM (SAMPLE-AES / FairPlay)
+  // is detected and reported instead of being bypassed.
+
+  function mp4Boxes(buf, start = 0, end = buf.length) {
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const out = [];
+    for (let o = start; o + 8 <= end;) {
+      let size = dv.getUint32(o);
+      const type = String.fromCharCode(buf[o + 4], buf[o + 5], buf[o + 6], buf[o + 7]);
+      let header = 8;
+      if (size === 1) { size = Number(dv.getBigUint64(o + 8)); header = 16; }
+      else if (size === 0) size = end - o;
+      if (size < header || o + size > end) break;
+      out.push({ type, start: o, size, header, body: o + header, end: o + size });
+      o += size;
+    }
+    return out;
+  }
+
+  const mp4Slice = (buf, box) => buf.slice(box.start, box.end);
+  const mp4Set = (buf, off, value) => new DataView(buf.buffer, buf.byteOffset, buf.byteLength).setUint32(off, value);
+  const mp4Get = (buf, off) => new DataView(buf.buffer, buf.byteOffset, buf.byteLength).getUint32(off);
+
+  function concatBytes(parts) {
+    let n = 0;
+    for (const p of parts) n += p.length;
+    const out = new Uint8Array(n);
+    let o = 0;
+    for (const p of parts) { out.set(p, o); o += p.length; }
+    return out;
+  }
+
+  function mp4Box(type, ...parts) {
+    const body = concatBytes(parts);
+    const out = new Uint8Array(8 + body.length);
+    new DataView(out.buffer).setUint32(0, out.length);
+    for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+    out.set(body, 8);
+    return out;
+  }
+
+  /** Tracks and headers of an fMP4 init segment (ftyp + moov). */
+  function mp4Info(buf) {
+    const top = mp4Boxes(buf);
+    const moov = top.find((b) => b.type === 'moov');
+    if (!moov) return null;
+    const kids = mp4Boxes(buf, moov.body, moov.end);
+    const mvhd = kids.find((b) => b.type === 'mvhd');
+    if (!mvhd) return null;
+    const traks = [];
+    for (const trak of kids.filter((b) => b.type === 'trak')) {
+      const tk = mp4Boxes(buf, trak.body, trak.end);
+      const mdia = tk.find((b) => b.type === 'mdia');
+      const tkhd = tk.find((b) => b.type === 'tkhd');
+      if (!mdia || !tkhd) continue;
+      const mdiaKids = mp4Boxes(buf, mdia.body, mdia.end);
+      const hdlr = mdiaKids.find((b) => b.type === 'hdlr');
+      const mdhd = mdiaKids.find((b) => b.type === 'mdhd');
+      if (!hdlr || !mdhd) continue;
+      traks.push({
+        trak, tkhd, mdia,
+        handler: String.fromCharCode(buf[hdlr.body + 8], buf[hdlr.body + 9], buf[hdlr.body + 10], buf[hdlr.body + 11]),
+        id: mp4Get(buf, tkhd.body + (buf[tkhd.body] === 1 ? 20 : 12)),
+        timescale: mp4Get(buf, mdhd.body + (buf[mdhd.body] === 1 ? 20 : 12)) || 1,
+      });
+    }
+    const mvex = kids.find((b) => b.type === 'mvex');
+    const trexs = mvex ? mp4Boxes(buf, mvex.body, mvex.end).filter((b) => b.type === 'trex') : [];
+    return { top, moov, kids, traks, trexs, mvhd, nextOff: 8 + (buf[mvhd.body] === 1 ? 108 : 96) };
+  }
+
+  /** Merge a video init segment and an audio init segment into one movie. */
+  function mp4MergeInit(video, audio) {
+    const v = video.info;
+    const a = audio.info;
+    const vTrak = v?.traks.find((t) => t.handler === 'vide') || v?.traks[0];
+    const aTrak = a?.traks.find((t) => t.handler === 'soun') || a?.traks[0];
+    if (!vTrak || !aTrak) throw new Error('could not read the MP4 track headers');
+    if (!v.trexs[0] || !a.trexs[0]) throw new Error('fragmented MP4 headers have no track defaults');
+
+    const used = new Set(v.traks.map((t) => t.id));
+    let audioId = 1;
+    while (used.has(audioId)) audioId++;
+
+    const aTrakBox = mp4Slice(audio.initBytes, aTrak.trak);
+    const tkhdRel = aTrak.tkhd.body - aTrak.trak.start;
+    mp4Set(aTrakBox, tkhdRel + (aTrakBox[tkhdRel] === 1 ? 20 : 12), audioId);
+
+    const vTrex = mp4Slice(video.initBytes, v.trexs[0]);
+    mp4Set(vTrex, 12, vTrak.id);
+    const aTrex = mp4Slice(audio.initBytes, a.trexs[0]);
+    mp4Set(aTrex, 12, audioId);
+
+    const mvhd = mp4Slice(video.initBytes, v.mvhd);
+    mp4Set(mvhd, v.nextOff, Math.max(audioId, ...used) + 1);
+
+    const ftypBox = v.top.find((b) => b.type === 'ftyp');
+    const ftyp = ftypBox ? mp4Slice(video.initBytes, ftypBox) : new Uint8Array(0);
+    const others = v.kids
+      .filter((b) => !['mvhd', 'trak', 'mvex'].includes(b.type))
+      .map((b) => mp4Slice(video.initBytes, b));
+    const moov = mp4Box('moov', mvhd, ...v.traks.map((t) => mp4Slice(video.initBytes, t.trak)), aTrakBox, mp4Box('mvex', vTrex, aTrex), ...others);
+    return { init: concatBytes([ftyp, moov]), audioId };
+  }
+
+  /** Renumber the track in a fragment so it matches the merged movie. */
+  function mp4PatchTrackId(bytes, oldId, newId) {
+    const copy = bytes.slice();
+    for (const moof of mp4Boxes(copy)) {
+      if (moof.type !== 'moof') continue;
+      for (const traf of mp4Boxes(copy, moof.body, moof.end)) {
+        if (traf.type !== 'traf') continue;
+        for (const tfhd of mp4Boxes(copy, traf.body, traf.end)) {
+          if (tfhd.type === 'tfhd' && mp4Get(copy, tfhd.body + 4) === oldId) mp4Set(copy, tfhd.body + 4, newId);
+        }
+      }
+    }
+    return copy;
+  }
+
+  /** A media segment as one or more moof+mdat fragments, with decode times. */
+  function mp4Fragments(bytes, timescale, startTime) {
+    const top = mp4Boxes(bytes);
+    if (!top.some((b) => b.type === 'moof')) return [{ time: startTime, bytes }]; // MPEG-TS
+    const out = [];
+    for (let i = 0; i < top.length; i++) {
+      const moof = top[i];
+      if (moof.type !== 'moof') continue;
+      let end = moof.end;
+      for (let j = i + 1; j < top.length; j++) {
+        if (top[j].type === 'mdat') { end = top[j].end; break; }
+        if (top[j].type === 'moof') break;
+      }
+      let time = startTime;
+      const traf = mp4Boxes(bytes, moof.body, moof.end).find((b) => b.type === 'traf');
+      const tfdt = traf && mp4Boxes(bytes, traf.body, traf.end).find((b) => b.type === 'tfdt');
+      if (tfdt) {
+        const t = bytes[tfdt.body] === 1 ? Number(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(tfdt.body + 4)) : mp4Get(bytes, tfdt.body + 4);
+        time = t / (timescale || 1);
+      }
+      out.push({ time, bytes: bytes.subarray(moof.start, end) });
+    }
+    return out;
+  }
+
+  // HLS playlists are line-oriented; attributes look like KEY="value",KEY=value.
+  function hlsAttrs(s) {
+    const out = {};
+    const re = /([A-Z0-9-]+)=("[^"]*"|[^,]*)/g;
+    let m;
+    while ((m = re.exec(s))) out[m[1]] = m[2].replace(/^"|"$/g, '');
+    return out;
+  }
+
+  function hlsRange(s) {
+    const m = /^(\d+)(?:@(\d+))?$/.exec(String(s || '').trim());
+    return m ? { length: +m[1], offset: m[2] == null ? null : +m[2] } : null;
+  }
+
+  function parseHlsMaster(text, base) {
+    const variants = [];
+    const renditions = [];
+    let pending = null;
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line) continue;
+      if (line.startsWith('#EXT-X-STREAM-INF:')) { pending = hlsAttrs(line.slice(18)); continue; }
+      if (line.startsWith('#EXT-X-MEDIA:')) {
+        const a = hlsAttrs(line.slice(13));
+        if (a.TYPE === 'AUDIO' && a.URI) renditions.push({ ...a, url: abs(a.URI, base), bandwidth: +a.BANDWIDTH || 0 });
+        continue;
+      }
+      if (!line.startsWith('#') && pending) {
+        variants.push({ ...pending, url: abs(line, base), bandwidth: +pending.BANDWIDTH || 0, resolution: pending.RESOLUTION || '', audioGroup: pending.AUDIO || null });
+        pending = null;
+      }
+    }
+    return { variants, renditions };
+  }
+
+  function parseHlsMedia(text, base) {
+    const segments = [];
+    let init = null;
+    let key = null;
+    let range = null;
+    let lastEnd = 0;
+    let lastUrl = null;
+    let seq = 0;
+    let dur = 0;
+    let start = 0;
+    let expect = false;
+    let disc = false;
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line) continue;
+      if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) { seq = +line.slice(22) || 0; continue; }
+      if (line.startsWith('#EXT-X-MAP:')) {
+        const a = hlsAttrs(line.slice(11));
+        init = { url: abs(a.URI, base), range: hlsRange(a.BYTERANGE) };
+        continue;
+      }
+      if (line.startsWith('#EXT-X-KEY:')) {
+        const a = hlsAttrs(line.slice(11));
+        if (a.METHOD === 'NONE') key = null;
+        else if (a.METHOD === 'AES-128' && (!a.KEYFORMAT || a.KEYFORMAT === 'identity')) key = { method: a.METHOD, url: abs(a.URI, base), iv: a.IV || null };
+        else key = { method: a.METHOD || 'unknown', unsupported: true };
+        continue;
+      }
+      if (line.startsWith('#EXT-X-BYTERANGE:')) { range = hlsRange(line.slice(17)); continue; }
+      if (line.startsWith('#EXTINF:')) { dur = parseFloat(line.slice(8)) || 0; expect = true; continue; }
+      if (line === '#EXT-X-DISCONTINUITY') { disc = true; continue; }
+      if (line.startsWith('#')) continue;
+      if (!expect) continue;
+      const url = abs(line, base);
+      const off = range ? (range.offset == null ? (lastUrl === url ? lastEnd : 0) : range.offset) : null;
+      const seg = { url, start, duration: dur, seq: seq + segments.length, key };
+      if (disc) seg.discontinuity = true;
+      if (range) seg.range = { offset: off, length: range.length };
+      segments.push(seg);
+      if (range) { lastEnd = off + range.length; lastUrl = url; } else { lastEnd = 0; lastUrl = null; }
+      start += dur;
+      dur = 0;
+      range = null;
+      expect = false;
+      disc = false;
+    }
+    return { segments, init, duration: start };
+  }
+
+  function pickHlsVariant(variants) {
+    const area = (v) => {
+      const m = /^(\d+)x(\d+)$/.exec(v.resolution || '');
+      return m ? +m[1] * +m[2] : 0;
+    };
+    return [...variants].sort((a, b) => area(b) - area(a) || b.bandwidth - a.bandwidth)[0] || null;
+  }
+
+  function pickHlsRendition(renditions, group) {
+    const matches = renditions.filter((r) => r['GROUP-ID'] === group);
+    return matches.find((r) => /^yes$/i.test(r.DEFAULT || '')) || matches.sort((a, b) => b.bandwidth - a.bandwidth)[0] || null;
+  }
+
+  function hexBytes(s) {
+    const h = String(s || '').replace(/^0x/i, '');
+    const out = new Uint8Array(h.length / 2);
+    for (let i = 0; i < out.length; i++) out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+    return out;
+  }
 
   // --------------------------------------------------------------- exporter
 
@@ -2362,7 +2881,7 @@ ${c.videosLocked ? '<p class="xp-note">🔒 The instructor turned off video down
       <label><input type="checkbox" name="slides" checked> Slides</label>
       <label><input type="checkbox" name="discussions" checked> Q&amp;A discussions</label>
       <label><input type="checkbox" name="notes" checked> My notes</label>
-      <label><input type="checkbox" name="videos" checked> Recordings, where the instructor allows downloads</label>
+      <label><input type="checkbox" name="videos" checked> Recordings <span class="muted">(download when offered, otherwise save the stream)</span></label>
       <label><input type="checkbox" name="skipExisting" checked> Skip files already in the folder</label>
       <label>Skip files larger than <input type="number" name="maxMB" min="0" value="0"> MB <span class="muted">(0 = no limit)</span></label>
     </fieldset>

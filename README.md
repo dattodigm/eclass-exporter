@@ -7,8 +7,7 @@ course info, section content and labels, files, assignments (including your own 
 feedback), forums, wikis, quiz reviews, lessons, books, glossaries, databases, H5P, links, and your grades.
 
 It also backs up your [Echo360](https://echo360.ca) lecture recordings' material: transcripts, slide decks,
-Q&A discussions and your notes, plus the recordings themselves where the instructor allows downloads
-(see [Echo360](#echo360)).
+Q&A discussions and your notes, plus the recordings themselves(see [Echo360](#echo360)).
 
 - **Back up every course:** on any eClass page click **⬇ Export eClass** (bottom right) → *Choose courses…* → *Export selected*
 - **Back up one course:** open the course (or any activity in it) → **⬇ Export eClass** → *Export this course*
@@ -108,7 +107,7 @@ For every lesson it saves:
 | Slides | the instructor's original file (usually a PDF) and `slides.html` with the text of every slide |
 | Q&A | `discussions.html`: questions with their position in the recording, and all replies |
 | Details | date, length, group/week, poster image, `lesson.json` |
-| Recording | **only when the instructor allows downloads.** Otherwise the lesson is marked 🔒 *online only* and links to the Echo360 player |
+| Recording | `recording.mp4`: Echo360's own download when the instructor allows it; otherwise the same HLS stream the player uses, with its separate video and audio renditions joined into one MP4 (no re-encoding). DRM-protected streams are skipped. |
 
 Plus `my-notes.txt` (your Echo360 notes, when you have any) and an `index.html` per course listing every lesson.
 
@@ -121,16 +120,18 @@ eClass-Backup/
       └─ 02 - LIVE LECTURE SESSION RECORDINGS/
          └─ 22 - Week 1 - Session 1/
             ├─ index.html
+            ├─ recording.mp4
             ├─ transcript.vtt
             ├─ transcript.txt
             ├─ Week 1.pdf
             └─ slides.html
 ```
 
-**About recordings.** Instructors decide per course whether students may download recordings, and Echo360 only offers
-the download when they do. The exporter uses that same official download and never saves the streaming copy, because that
-would bypass the instructor's choice. In our testing none of the courses allowed downloads, so the video download path has
-not been exercised yet. If you need a recording, ask the instructor to enable downloads; the next export will pick it up.
+**About recordings.** When the instructor has turned downloads off, the exporter saves the recording straight from
+the same HLS playlist the Echo360 player plays. Echo360 usually stores video and audio as two separate streams, so
+the exporter downloads both and muxes their fragments into a single `recording.mp4` without re-encoding; the result
+keeps the original resolution and audio. A two-hour lecture is roughly 250–500 MB, so use *Save to a folder* for
+full courses. Streams protected by DRM are detected and skipped (the lesson then links to Echo360).
 
 ## What is and isn't saved
 

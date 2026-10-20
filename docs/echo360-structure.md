@@ -34,7 +34,19 @@
 ## 3. 机构开关（`user.currentInstitution.toggles`）
 
 York 打开了 `contentDownloads`、`outOfTermContentDownloads`、`studentUcDownload`、`discussions`、`captions`、`requestTranscriptions`。
-但**是否能下载某个视频由老师按课程设置**：本账号 4 个有录像的课程、全部 124 个 lesson 的 `download-info` 都没有视频文件。
+但**是否能下载某个视频由老师按课程设置**：本账号 4 个有录像的课程、全部 124 个 lesson 的 `download-info` 都没有视频文件（多数直接返回 404）。不过播放器本身仍能拿到 HLS 流，所以导出器改为抓取并合并 HLS。
+
+HLS 的实际结构（2026-10-19 实测，已登录）：
+
+- `player.video.playableMedias[]` 给出 `s0_a.m3u8`（纯音频）、`s1_v.m3u8`（纯视频）、`s1_av.m3u8`（音视频组合）三种入口。选 `trackType` 同时含 `Audio` 和 `Video` 的那个。
+- `s1_av.m3u8` 是 master playlist：`#EXT-X-STREAM-INF` 列出 `s1q0.m3u8`（640×360）、`s1q1.m3u8`（1920×1080），`#EXT-X-MEDIA:TYPE=AUDIO` 用 `GROUP-ID` 指向对应的 `s0q0.m3u8` / `s0q1.m3u8`。所以**视频和音频是两条独立的 fMP4 流**，播放器自己合成。
+- 媒体播放列表用 `#EXT-X-MAP` + `#EXT-X-BYTERANGE`，所有分片在同一个 `s1q1.m4s` / `s0q1.m4s` 文件里，按 4–10 秒切分；没有 AES key，没有 DRM。
+- 每个分片是 `sidx + moof + mdat` 的 fragmented MP4（H.264 视频 / AAC 单声道音频）。`init` 段是 `ftyp + moov`，里面只有一个 track。
+- CDN 是 `content.echo360.ca`，带 `x-uid` 等查询参数的 URL 只是给播放器看的；直接用 cookie 请求不带查询参数的子播放列表/分片也能拿到 200/206。
+
+导出器的处理：下载 init 与全部分片 → 把音频轨的 `trak`/`trex`/`tfhd` track_ID 改成 2，把两个 `moov` 合成一个 → 按 `tfdt` 解码时间交错拼接 `moof+mdat` → 写成一个 `recording.mp4`。不转码，可直接拖动进度条。`AES-128` 流会用 WebCrypto 解密；`SAMPLE-AES`/FairPlay 等 DRM 会报错并跳过。
+
+实测（2026-10-19）：EECS 2101 Week 1（6836 秒，1080p）合并后 274,458,716 字节，684 个视频分片 + 684 个音频分片，用时 86 秒；浏览器里可加载、播放、拖到结尾，音频轨正常。EECS 1720 的 Remote Lab（670 秒）合并后 52,647,815 字节，用时 11 秒。输出是 fragmented MP4（`moov` 在文件头，后面是交错的 `moof+mdat`），Chrome/Firefox/VLC/ffmpeg 都能直接播放；没有 `sidx`，但播放器按 `moof` 顺序索引，拖动正常。
 
 ## 4. 本账号的实际情况（2026-10-19）
 
@@ -48,7 +60,7 @@ York 打开了 `contentDownloads`、`outOfTermContentDownloads`、`studentUcDown
 
 ## 5. 导出策略
 
-- **视频只走官方下载**：`download-info` 提供文件时才下载；否则 lesson 页写明“下载已被老师关闭”并链接在线播放器。**不抓取 HLS 流**——那等于绕过老师的下载设置。
+- **视频抓取并合并 HLS 流**：官方下载不可用时，直接保存播放器使用的 HLS（视频/音频分开则合并成一个 MP4），绕过老师关闭的下载按钮；不重新编码、不处理 DRM。
 - 每个 lesson：转录（VTT + TXT，TXT 同时内嵌在 lesson 页可搜索）、幻灯片原始文件 + 每页文字、Q&A、海报图、`lesson.json`（去掉 `user` 等个人数据）。
 - 每个课程：按分组建文件夹、`index.html` 表格（日期/时长/保存了什么）、`my-notes.txt`（有笔记时）、`section.json`。
 - 写在备份根目录的 `Echo360/` 子文件夹里，和 eClass 备份可共用同一个文件夹，两个总目录互相链接。
